@@ -50,19 +50,19 @@ export function DatePicker({
     const daysInMonth = lastDay.getDate()
     const startingDay = firstDay.getDay()
 
-    const days: (number | null)[] = []
+    const monthDays: (number | null)[] = []
 
     // Add empty cells for days before the first day of the month
     for (let i = 0; i < startingDay; i++) {
-      days.push(null)
+      monthDays.push(null)
     }
 
     // Add days of the month
     for (let i = 1; i <= daysInMonth; i++) {
-      days.push(i)
+      monthDays.push(i)
     }
 
-    return days
+    return monthDays
   }
 
   const handlePrevMonth = () => {

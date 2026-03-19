@@ -6,7 +6,7 @@
 # ==========================================
 # Stage 1: Builder
 # ==========================================
-FROM node:20-alpine AS builder
+FROM node:24.14.0-alpine AS builder
 
 # Labels for tracking
 LABEL stage="builder"
@@ -40,7 +40,7 @@ RUN npm run build && \
 # ==========================================
 # Stage 2: Production
 # ==========================================
-FROM node:20-alpine AS production
+FROM node:24.14.0-alpine AS production
 
 # Metadata labels
 LABEL maintainer="security@edustatus.uz"

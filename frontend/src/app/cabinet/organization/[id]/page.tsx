@@ -13,6 +13,7 @@
 
 import { useState } from "react"
 import { useParams, useRouter } from "next/navigation"
+import Image from "next/image"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -135,9 +136,11 @@ export default function OrganizationDetailPage() {
             </Button>
           </Link>
           {organization.logo ? (
-            <img
+            <Image
               src={organization.logo}
               alt={organization.name}
+              width={48}
+              height={48}
               className="h-12 w-12 rounded-lg object-cover border"
             />
           ) : (

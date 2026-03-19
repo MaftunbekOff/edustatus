@@ -36,6 +36,7 @@ import {
   Building2,
 } from "lucide-react"
 import Link from "next/link"
+import Image from "next/image"
 
 // Hooks
 import { useAuth } from "@/lib/auth-context"
@@ -372,11 +373,16 @@ function OrganizationRow({ organization }: { organization: Organization }) {
       <TableCell>
         <div className="flex items-center gap-3">
           {organization.logo ? (
-            <img
-              src={organization.logo}
-              alt={organization.name}
-              className="h-10 w-10 rounded-lg object-cover border"
-            />
+            <div className="relative h-10 w-10 overflow-hidden rounded-lg border">
+              <Image
+                src={organization.logo}
+                alt={organization.name}
+                fill
+                sizes="40px"
+                unoptimized
+                className="object-cover"
+              />
+            </div>
           ) : (
             <div className="h-10 w-10 rounded-lg bg-purple-100 flex items-center justify-center border">
               <Building2 className="h-5 w-5 text-purple-600" />

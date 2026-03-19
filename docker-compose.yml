@@ -7,7 +7,7 @@
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     container_name: edustatus-db
     restart: unless-stopped
     environment:
@@ -73,6 +73,7 @@ services:
       - SUPER_ADMIN_PASSWORD=${SUPER_ADMIN_PASSWORD:?SUPER_ADMIN_PASSWORD is required}
       - NODE_ENV=production
       - QUERY_ROUTER_URL=http://query-router:8080
+      - SHARD_MANAGER_URL=http://shard-manager:8081
     depends_on:
       postgres:
         condition: service_healthy
@@ -132,6 +133,36 @@ services:
     tmpfs:
       - /tmp
 
+  shard-manager:
+    build:
+      context: ./services/shard-manager
+      dockerfile: Dockerfile
+    container_name: edustatus-shard-manager
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8081:8081"
+    environment:
+      - PORT=8081
+      - DB_USER=orgstatus
+      - DB_PASSWORD=${POSTGRES_PASSWORD}
+    depends_on:
+      - postgres
+    networks:
+      - backend-network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+
   redis:
     image: redis:7-alpine
     container_name: edustatus-redis
@@ -152,6 +183,35 @@ services:
     security_opt:
       - no-new-privileges:true
     read_only: false
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: edustatus-frontend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:3001
+      - NODE_ENV=production
+    depends_on:
+      - backend
+    networks:
+      - frontend-network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
 
 networks:
   # Frontend network - accessible from outside

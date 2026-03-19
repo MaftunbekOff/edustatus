@@ -3,6 +3,7 @@
 import * as React from "react"
 import { cn } from "@/lib/utils"
 import { User } from "lucide-react"
+import Image from "next/image"
 
 interface AvatarProps extends React.HTMLAttributes<HTMLDivElement> {
   src?: string
@@ -46,15 +47,15 @@ export function Avatar({
 }: AvatarProps) {
   const [imageError, setImageError] = React.useState(false)
 
-  const getInitials = (name: string) => {
-    const parts = name.split(" ")
+  const getInitials = (fullName: string) => {
+    const parts = fullName.split(" ")
     if (parts.length >= 2) {
       return `${parts[0][0]}${parts[1][0]}`.toUpperCase()
     }
-    return name.substring(0, 2).toUpperCase()
+    return fullName.substring(0, 2).toUpperCase()
   }
 
-  const getColorFromName = (name: string) => {
+  const getColorFromName = (fullName: string) => {
     const colors = [
       "bg-red-500",
       "bg-blue-500",
@@ -66,8 +67,8 @@ export function Avatar({
       "bg-teal-500",
     ]
     let hash = 0
-    for (let i = 0; i < name.length; i++) {
-      hash = name.charCodeAt(i) + ((hash << 5) - hash)
+    for (let i = 0; i < fullName.length; i++) {
+      hash = fullName.charCodeAt(i) + ((hash << 5) - hash)
     }
     return colors[Math.abs(hash) % colors.length]
   }
@@ -83,10 +84,13 @@ export function Avatar({
         {...props}
       >
         {src && !imageError ? (
-          <img
+          <Image
             src={src}
             alt={alt || name || "Avatar"}
-            className="h-full w-full object-cover"
+            fill
+            sizes="64px"
+            unoptimized
+            className="object-cover"
             onError={() => setImageError(true)}
           />
         ) : name ? (

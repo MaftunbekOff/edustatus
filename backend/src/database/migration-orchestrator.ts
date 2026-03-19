@@ -176,8 +176,8 @@ export class MigrationOrchestrator {
       this.selectShardForOrganization(org)
     );
 
-    const location = this.shardManager.getOrganizationLocation(newOrgId);
-    const shard = this.shardManager.getShardConnection(newOrgId);
+    const location = await this.shardManager.getOrganizationLocation(newOrgId);
+    const shard = await this.shardManager.getShardConnection(newOrgId);
 
     // Create organization schema
     await shard.pool.query(`CREATE SCHEMA IF NOT EXISTS ${location.schema}`);
@@ -295,9 +295,17 @@ export class MigrationOrchestrator {
   }
 
   private selectShardForOrganization(org: any): string {
-    // Distribute organizations across shards
-    const shardIndex = Math.abs(org.id.hashCode()) % 10;
+    // Distribute organizations across shards using deterministic hash
+    const shardIndex = this.hashString(String(org.id || '')) % 10;
     return shardIndex.toString().padStart(4, '0');
+  }
+
+  private hashString(value: string): number {
+    let hash = 0;
+    for (let i = 0; i < value.length; i++) {
+      hash = (hash * 31 + value.charCodeAt(i)) >>> 0;
+    }
+    return hash;
   }
 
   private async createGlobalTables(pool: Pool): Promise<void> {
@@ -490,8 +498,8 @@ export class MigrationOrchestrator {
   }
 
   private async migrateOrganizationHistoricalData(oldOrgId: string, newOrgId: string): Promise<void> {
-    const location = this.shardManager.getOrganizationLocation(newOrgId);
-    const shard = this.shardManager.getShardConnection(newOrgId);
+    const location = await this.shardManager.getOrganizationLocation(newOrgId);
+    const shard = await this.shardManager.getShardConnection(newOrgId);
 
     const oldConnection = new Pool({
       connectionString: process.env.OLD_DATABASE_URL,

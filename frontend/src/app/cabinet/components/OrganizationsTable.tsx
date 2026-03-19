@@ -1,5 +1,6 @@
 "use client"
 
+import Link from "next/link"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import {
@@ -21,12 +22,12 @@ export function OrganizationsTable({ organizations }: OrganizationsTableProps) {
     <Card>
       <CardHeader className="flex flex-row items-center justify-between">
         <CardTitle className="text-lg">Tashkilotlar ro'yxati</CardTitle>
-        <a
+        <Link
           href="/cabinet/organization"
           className="text-sm text-primary hover:underline"
         >
           Barchasini ko'rish
-        </a>
+        </Link>
       </CardHeader>
       <CardContent className="p-0">
         <Table>

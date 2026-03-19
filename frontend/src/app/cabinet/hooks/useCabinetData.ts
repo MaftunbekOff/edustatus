@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react"
+import { useState, useEffect, useCallback } from "react"
 import { dashboardApi, collegesApi, ApiError } from "@/lib/api"
 import { useAuth } from "@/lib/auth-context"
 
@@ -37,9 +37,9 @@ export function useCabinetData(): UseCabinetDataReturn {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     if (!token) return
-    
+
     try {
       setLoading(true)
       const [statsData, organizationsData] = await Promise.all([
@@ -61,13 +61,13 @@ export function useCabinetData(): UseCabinetDataReturn {
     } finally {
       setLoading(false)
     }
-  }
+  }, [token])
 
   useEffect(() => {
     if (token) {
       loadData()
     }
-  }, [token])
+  }, [token, loadData])
 
   return {
     stats,

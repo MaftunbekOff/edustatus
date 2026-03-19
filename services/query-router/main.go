@@ -4,17 +4,19 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"strconv"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 
-	"github.com/go-redis/redis/v8"
+	redis "github.com/redis/go-redis/v9"
 	"github.com/gorilla/mux"
-	"github.com/lib/pq"
+	_ "github.com/lib/pq"
 	"github.com/rs/zerolog"
 )
 
@@ -51,9 +53,28 @@ type OrganizationLocation struct {
 }
 
 type QueryRouter struct {
-	logger        zerolog.Logger
-	redis         *redis.Client
-	shardManager  *ShardManager // Placeholder, will need to integrate
+	logger zerolog.Logger
+	redis  *redis.Client
+}
+
+var safeIdentifierRegex = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+
+var allowedTables = map[string]struct{}{
+	"organizations":      {},
+	"organization_admins": {},
+	"clients":            {},
+	"payments":           {},
+	"departments":        {},
+	"audit_logs":         {},
+}
+
+var allowedColumnsByTable = map[string]map[string]struct{}{
+	"organizations": {"id": {}, "name": {}, "inn": {}, "type": {}, "industry": {}, "is_government": {}, "region": {}, "district": {}, "subdomain": {}, "custom_domain": {}, "plan": {}, "status": {}, "email": {}, "phone": {}, "address": {}, "logo": {}, "created_at": {}, "updated_at": {}},
+	"organization_admins": {"id": {}, "organization_id": {}, "email": {}, "full_name": {}, "phone": {}, "role": {}, "status": {}, "last_login": {}, "created_at": {}, "updated_at": {}},
+	"clients": {"id": {}, "organization_id": {}, "pinfl": {}, "contract_number": {}, "full_name": {}, "phone": {}, "email": {}, "address": {}, "birth_date": {}, "department_id": {}, "total_amount": {}, "paid_amount": {}, "debt_amount": {}, "status": {}, "additional_info": {}, "contact_phone": {}, "contact_name": {}, "created_at": {}, "updated_at": {}},
+	"payments": {"id": {}, "organization_id": {}, "client_id": {}, "amount": {}, "currency": {}, "payment_method": {}, "status": {}, "transaction_id": {}, "reference_number": {}, "bank_account": {}, "bank_mfo": {}, "bank_name": {}, "payment_date": {}, "confirmed_at": {}, "confirmed_by": {}, "description": {}, "reconciled": {}, "reconciled_at": {}, "reconciled_with": {}, "category": {}, "created_at": {}, "updated_at": {}},
+	"departments": {"id": {}, "organization_id": {}, "name": {}, "code": {}, "description": {}, "manager_name": {}, "specialty": {}, "course": {}, "year": {}, "created_at": {}, "updated_at": {}},
+	"audit_logs": {"id": {}, "organization_id": {}, "user_id": {}, "action": {}, "entity": {}, "entity_id": {}, "old_value": {}, "new_value": {}, "ip_address": {}, "user_agent": {}, "created_at": {}},
 }
 
 func NewQueryRouter() *QueryRouter {
@@ -73,6 +94,13 @@ func NewQueryRouter() *QueryRouter {
 }
 
 func (qr *QueryRouter) RouteQuery(w http.ResponseWriter, r *http.Request) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			qr.logger.Warn().Interface("panic", recovered).Msg("Rejected unsafe query input")
+			http.Error(w, "Invalid query", http.StatusBadRequest)
+		}
+	}()
+
 	startTime := time.Now()
 
 	var query ParsedQuery
@@ -114,6 +142,9 @@ func (qr *QueryRouter) executeOnShard(query ParsedQuery) (*QueryResult, error) {
 	// Placeholder: get shard connection
 	// In real implementation, integrate with ShardManager
 	conn := qr.getShardConnection(query.OrgID)
+	if conn == nil {
+		return nil, errors.New("database connection is not available")
+	}
 	location := qr.getOrganizationLocation(query.OrgID)
 
 	sql := qr.buildSQLQuery(query, location.Schema)
@@ -160,26 +191,32 @@ func (qr *QueryRouter) executeOnShard(query ParsedQuery) (*QueryResult, error) {
 }
 
 func (qr *QueryRouter) buildSQLQuery(query ParsedQuery, schema string) string {
+	safeSchema := validateIdentifier(schema, "schema")
+	safeTable := validateTable(query.Table)
+
 	switch query.Operation {
 	case "SELECT":
-		return qr.buildSelectQuery(schema, query)
+		return qr.buildSelectQuery(safeSchema, safeTable, query)
 	case "INSERT":
-		return qr.buildInsertQuery(schema, query)
+		return qr.buildInsertQuery(safeSchema, safeTable, query)
 	case "UPDATE":
-		return qr.buildUpdateQuery(schema, query)
+		return qr.buildUpdateQuery(safeSchema, safeTable, query)
 	case "DELETE":
-		return qr.buildDeleteQuery(schema, query)
+		return qr.buildDeleteQuery(safeSchema, safeTable, query)
 	default:
 		panic(fmt.Sprintf("Unsupported operation: %s", query.Operation))
 	}
 }
 
-func (qr *QueryRouter) buildSelectQuery(schema string, query ParsedQuery) string {
-	sql := fmt.Sprintf("SELECT * FROM %s.%s", schema, query.Table)
+func (qr *QueryRouter) buildSelectQuery(schema string, table string, query ParsedQuery) string {
+	mustValidateColumnMap(table, query.Conditions, "conditions")
+	sql := fmt.Sprintf("SELECT * FROM %s.%s", schema, table)
 
 	if len(query.Joins) > 0 {
 		for _, join := range query.Joins {
-			sql += fmt.Sprintf(" JOIN %s.%s ON %s", schema, join.Table, join.On)
+			joinTable := validateTable(join.Table)
+			joinClause := mustValidateJoinCondition(table, joinTable, join.On)
+			sql += fmt.Sprintf(" JOIN %s.%s ON %s", schema, joinTable, joinClause)
 		}
 	}
 
@@ -189,7 +226,7 @@ func (qr *QueryRouter) buildSelectQuery(schema string, query ParsedQuery) string
 	}
 
 	if query.OrderBy != "" {
-		sql += " ORDER BY " + query.OrderBy
+		sql += " ORDER BY " + mustValidateOrderBy(table, query.OrderBy)
 	}
 
 	if query.Limit > 0 {
@@ -203,46 +240,55 @@ func (qr *QueryRouter) buildSelectQuery(schema string, query ParsedQuery) string
 	return sql
 }
 
-func (qr *QueryRouter) buildInsertQuery(schema string, query ParsedQuery) string {
-	cols := make([]string, 0, len(query.Data))
-	placeholders := make([]string, 0, len(query.Data))
+func (qr *QueryRouter) buildInsertQuery(schema string, table string, query ParsedQuery) string {
+	mustValidateColumnMap(table, query.Data, "data")
+	keys := sortedKeys(query.Data)
+	cols := make([]string, 0, len(keys))
+	placeholders := make([]string, 0, len(keys))
 
-	i := 1
-	for col := range query.Data {
-		cols = append(cols, col)
-		placeholders = append(placeholders, fmt.Sprintf("$%d", i))
-		i++
+	for i, col := range keys {
+		cols = append(cols, validateIdentifier(col, "column"))
+		placeholders = append(placeholders, fmt.Sprintf("$%d", i+1))
 	}
 
 	return fmt.Sprintf("INSERT INTO %s.%s (%s) VALUES (%s) RETURNING *",
-		schema, query.Table, strings.Join(cols, ", "), strings.Join(placeholders, ", "))
+		schema, table, strings.Join(cols, ", "), strings.Join(placeholders, ", "))
 }
 
-func (qr *QueryRouter) buildUpdateQuery(schema string, query ParsedQuery) string {
-	sets := make([]string, 0, len(query.Data))
-	i := 1
-	for col := range query.Data {
-		sets = append(sets, fmt.Sprintf("%s = $%d", col, i))
-		i++
+func (qr *QueryRouter) buildUpdateQuery(schema string, table string, query ParsedQuery) string {
+	mustValidateColumnMap(table, query.Data, "data")
+	mustValidateColumnMap(table, query.Conditions, "conditions")
+	dataKeys := sortedKeys(query.Data)
+	sets := make([]string, 0, len(dataKeys))
+	for i, col := range dataKeys {
+		sets = append(sets, fmt.Sprintf("%s = $%d", validateIdentifier(col, "column"), i+1))
 	}
 
-	where := qr.buildWhereClause(query.Conditions)
+	where := qr.buildWhereClauseWithOffset(query.Conditions, len(dataKeys))
 	return fmt.Sprintf("UPDATE %s.%s SET %s WHERE %s RETURNING *",
-		schema, query.Table, strings.Join(sets, ", "), where)
+		schema, table, strings.Join(sets, ", "), where)
 }
 
-func (qr *QueryRouter) buildDeleteQuery(schema string, query ParsedQuery) string {
+func (qr *QueryRouter) buildDeleteQuery(schema string, table string, query ParsedQuery) string {
+	mustValidateColumnMap(table, query.Conditions, "conditions")
 	where := qr.buildWhereClause(query.Conditions)
-	return fmt.Sprintf("DELETE FROM %s.%s WHERE %s RETURNING *", schema, query.Table, where)
+	return fmt.Sprintf("DELETE FROM %s.%s WHERE %s RETURNING *", schema, table, where)
 }
 
 func (qr *QueryRouter) buildWhereClause(conditions map[string]interface{}) string {
+	return qr.buildWhereClauseWithOffset(conditions, 0)
+}
+
+func (qr *QueryRouter) buildWhereClauseWithOffset(conditions map[string]interface{}, offset int) string {
 	clauses := make([]string, 0, len(conditions))
-	for key, value := range conditions {
+	keys := sortedKeys(conditions)
+	for idx, key := range keys {
+		value := conditions[key]
+		safeColumn := validateIdentifier(key, "column")
 		if value == nil {
-			clauses = append(clauses, fmt.Sprintf("%s IS NULL", key))
+			clauses = append(clauses, fmt.Sprintf("%s IS NULL", safeColumn))
 		} else {
-			clauses = append(clauses, fmt.Sprintf("%s = ?", key))
+			clauses = append(clauses, fmt.Sprintf("%s = $%d", safeColumn, offset+idx+1))
 		}
 	}
 	return strings.Join(clauses, " AND ")
@@ -252,13 +298,15 @@ func (qr *QueryRouter) extractParams(query ParsedQuery) []interface{} {
 	params := []interface{}{}
 
 	if query.Data != nil {
-		for _, v := range query.Data {
+		for _, k := range sortedKeys(query.Data) {
+			v := query.Data[k]
 			params = append(params, v)
 		}
 	}
 
 	if query.Conditions != nil {
-		for _, v := range query.Conditions {
+		for _, k := range sortedKeys(query.Conditions) {
+			v := query.Conditions[k]
 			if v != nil {
 				params = append(params, v)
 			}
@@ -324,17 +372,24 @@ func (qr *QueryRouter) getCacheTTL(table string) time.Duration {
 // Placeholder methods - need to integrate with actual ShardManager
 func (qr *QueryRouter) getShardConnection(orgID string) *sql.DB {
 	// Placeholder implementation
-	// In real implementation, get from ShardManager
-	db, err := sql.Open("postgres", "postgres://user:pass@localhost/db?sslmode=disable")
+	// In real implementation, call Shard Manager service
+	// For now, return a mock DB connection
+	db, err := sql.Open("postgres", os.Getenv("DATABASE_URL"))
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("Failed to connect to DB: %v", err)
+		return nil
 	}
 	return db
 }
 
 func (qr *QueryRouter) getOrganizationLocation(orgID string) OrganizationLocation {
-	// Placeholder
-	return OrganizationLocation{Schema: "org_" + orgID}
+	// Placeholder - in real implementation, call Shard Manager service
+	// For now, parse orgID to get schema
+	parts := strings.Split(orgID, "-")
+	if len(parts) != 3 {
+		return OrganizationLocation{Schema: "public"}
+	}
+	return OrganizationLocation{Schema: "org_" + strings.ReplaceAll(orgID, "-", "")}
 }
 
 func (qr *QueryRouter) respondJSON(w http.ResponseWriter, data interface{}) {
@@ -347,6 +402,100 @@ func getEnv(key, defaultVal string) string {
 		return val
 	}
 	return defaultVal
+}
+
+func sortedKeys(input map[string]interface{}) []string {
+	keys := make([]string, 0, len(input))
+	for key := range input {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func validateIdentifier(identifier string, label string) string {
+	if !safeIdentifierRegex.MatchString(identifier) {
+		panic(fmt.Sprintf("invalid %s: %s", label, identifier))
+	}
+	return identifier
+}
+
+func validateTable(table string) string {
+	safeTable := validateIdentifier(table, "table")
+	if _, ok := allowedTables[safeTable]; !ok {
+		panic(fmt.Sprintf("table is not allowed: %s", table))
+	}
+	return safeTable
+}
+
+func mustValidateColumnMap(table string, payload map[string]interface{}, payloadName string) {
+	if payload == nil {
+		return
+	}
+	tableColumns, ok := allowedColumnsByTable[table]
+	if !ok {
+		panic(fmt.Sprintf("column map is not configured for table: %s", table))
+	}
+
+	for key := range payload {
+		safeKey := validateIdentifier(key, "column")
+		if _, allowed := tableColumns[safeKey]; !allowed {
+			panic(fmt.Sprintf("column %s is not allowed in %s for table %s", key, payloadName, table))
+		}
+	}
+}
+
+func mustValidateOrderBy(table string, orderBy string) string {
+	parts := strings.Fields(strings.TrimSpace(orderBy))
+	if len(parts) == 0 || len(parts) > 2 {
+		panic(fmt.Sprintf("invalid orderBy clause: %s", orderBy))
+	}
+
+	column := validateIdentifier(parts[0], "order column")
+	tableColumns := allowedColumnsByTable[table]
+	if _, ok := tableColumns[column]; !ok {
+		panic(fmt.Sprintf("order column %s is not allowed for table %s", column, table))
+	}
+
+	direction := "ASC"
+	if len(parts) == 2 {
+		dir := strings.ToUpper(parts[1])
+		if dir != "ASC" && dir != "DESC" {
+			panic(fmt.Sprintf("invalid order direction: %s", parts[1]))
+		}
+		direction = dir
+	}
+
+	return fmt.Sprintf("%s %s", column, direction)
+}
+
+func mustValidateJoinCondition(baseTable string, joinTable string, clause string) string {
+	re := regexp.MustCompile(`^([a-zA-Z_][a-zA-Z0-9_]*)\.([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*([a-zA-Z_][a-zA-Z0-9_]*)\.([a-zA-Z_][a-zA-Z0-9_]*)$`)
+	match := re.FindStringSubmatch(strings.TrimSpace(clause))
+	if len(match) != 5 {
+		panic(fmt.Sprintf("invalid join clause: %s", clause))
+	}
+
+	leftTable := validateIdentifier(match[1], "join table")
+	leftColumn := validateIdentifier(match[2], "join column")
+	rightTable := validateIdentifier(match[3], "join table")
+	rightColumn := validateIdentifier(match[4], "join column")
+
+	if leftTable != baseTable && leftTable != joinTable {
+		panic(fmt.Sprintf("join table %s is not allowed in clause %s", leftTable, clause))
+	}
+	if rightTable != baseTable && rightTable != joinTable {
+		panic(fmt.Sprintf("join table %s is not allowed in clause %s", rightTable, clause))
+	}
+
+	if _, ok := allowedColumnsByTable[leftTable][leftColumn]; !ok {
+		panic(fmt.Sprintf("join column %s is not allowed for table %s", leftColumn, leftTable))
+	}
+	if _, ok := allowedColumnsByTable[rightTable][rightColumn]; !ok {
+		panic(fmt.Sprintf("join column %s is not allowed for table %s", rightColumn, rightTable))
+	}
+
+	return fmt.Sprintf("%s.%s = %s.%s", leftTable, leftColumn, rightTable, rightColumn)
 }
 
 func main() {

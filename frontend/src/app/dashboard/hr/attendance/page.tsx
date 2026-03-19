@@ -74,8 +74,8 @@ export default function AttendancePage() {
 
   const getDayOfWeek = (day: number) => {
     const date = new Date(year, month, day)
-    const days = ["Ya", "Du", "Se", "Cho", "Pa", "Ju", "Sha"]
-    return days[date.getDay()]
+    const weekdays = ["Ya", "Du", "Se", "Cho", "Pa", "Ju", "Sha"]
+    return weekdays[date.getDay()]
   }
 
   const isWeekend = (day: number) => {

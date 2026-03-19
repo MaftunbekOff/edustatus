@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
-import { APP_GUARD } from '@nestjs/core';
+import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { DatabaseModule } from './database/database.module';
 import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
@@ -12,6 +12,8 @@ import { OrganizationsModule } from './organizations/organizations.module';
 import { DashboardModule } from './dashboard/dashboard.module';
 import { CustomDomainsModule } from './custom-domains/custom-domains.module';
 import { HealthModule } from './health/health.module';
+import { AuditInterceptor } from './common/audit.interceptor';
+import { PerformanceInterceptor } from './common/performance.interceptor';
 
 @Module({
   imports: [
@@ -52,6 +54,14 @@ import { HealthModule } from './health/health.module';
     {
       provide: APP_GUARD,
       useClass: ThrottlerGuard,
+    },
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: AuditInterceptor,
+    },
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: PerformanceInterceptor,
     },
   ],
 })

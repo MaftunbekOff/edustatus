@@ -48,11 +48,30 @@ export class AuthController {
 
   @Post('refresh')
   async refreshToken(
+    @Request() req: any,
     @Body('refreshToken') refreshToken: string,
+    @Res() res: Response,
     @Ip() ip: string,
     @Headers('user-agent') userAgent: string,
   ) {
-    return this.authService.refreshToken(refreshToken, ip || 'unknown', userAgent || 'unknown');
+    const token = refreshToken || req?.cookies?.refreshToken;
+    const result = await this.authService.refreshToken(token, ip || 'unknown', userAgent || 'unknown');
+
+    res.cookie('accessToken', result.accessToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      maxAge: 15 * 60 * 1000,
+    });
+
+    res.cookie('refreshToken', result.refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
+
+    return res.json({ message: 'Token refreshed' });
   }
 
   @Post('logout')

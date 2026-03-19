@@ -13,6 +13,8 @@ import {
 import { OrganizationsService } from './organizations.service';
 import { CreateOrganizationDto } from './dto/create-organization.dto';
 import { UpdateOrganizationDto } from './dto/update-organization.dto';
+import { CreateChildOrganizationDto } from './dto/create-child-organization.dto';
+import { CreateOrganizationAdminDto } from './dto/create-organization-admin.dto';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/roles.guard';
 import { OrganizationAccessGuard } from '../auth/organization.guard';
@@ -69,21 +71,10 @@ export class OrganizationsController {
   @Roles('creator', 'admin')
   createChild(
     @Param('id') id: string,
-    @Body() body: {
-      name: string;
-      inn: string;
-      type?: string;
-      industry?: string;
-      isGovernment?: boolean;
-      region?: string;
-      district?: string;
-      email?: string;
-      phone: string;
-      address: string;
-    },
+    @Body() createChildOrganizationDto: CreateChildOrganizationDto,
     @Request() req: any,
   ) {
-    return this.organizationsService.createChildWithAuth(id, body, req.user);
+    return this.organizationsService.createChildWithAuth(id, createChildOrganizationDto, req.user);
   }
 
   // Administrator qo'shish
@@ -91,16 +82,10 @@ export class OrganizationsController {
   @Roles('creator', 'admin')
   createAdmin(
     @Param('id') id: string,
-    @Body() body: {
-      fullName: string;
-      email: string;
-      phone?: string;
-      password: string;
-      role?: string;
-    },
+    @Body() createOrganizationAdminDto: CreateOrganizationAdminDto,
     @Request() req: any,
   ) {
-    return this.organizationsService.createAdminWithAuth(id, body, req.user);
+    return this.organizationsService.createAdminWithAuth(id, createOrganizationAdminDto, req.user);
   }
 
   // Administratorlarni olish

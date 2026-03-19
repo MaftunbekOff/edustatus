@@ -13,6 +13,7 @@ interface User {
 
 interface AuthContextType {
   user: User | null
+  token: string | null
   isLoading: boolean
   login: (email: string, password: string) => Promise<void>
   logout: () => void
@@ -23,17 +24,35 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined)
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null)
+  const [token, setToken] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    // Check for stored user session on mount
-    const storedUser = sessionStorage.getItem('user')
+    const initializeAuth = async () => {
+      // Check for stored user session on mount
+      const storedUser = sessionStorage.getItem('user')
+      if (!storedUser) {
+        setIsLoading(false)
+        return
+      }
 
-    if (storedUser) {
-      setUser(JSON.parse(storedUser))
+      try {
+        const userFromServer = await authApi.getMe()
+        sessionStorage.setItem('user', JSON.stringify(userFromServer))
+        setUser(userFromServer)
+        setToken('authenticated')
+      } catch {
+        // Stored data is stale or tampered, clear local session
+        sessionStorage.removeItem('user')
+        setUser(null)
+        setToken(null)
+      } finally {
+        setIsLoading(false)
+      }
     }
-    setIsLoading(false)
+
+    initializeAuth()
   }, [])
 
   const login = async (email: string, password: string) => {
@@ -47,6 +66,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Store user info in session storage (not sensitive)
       sessionStorage.setItem('user', JSON.stringify(userData))
       setUser(userData)
+      // Tokens are now stored in httpOnly cookies by the backend
+      setToken('authenticated') // Just indicate we're authenticated
     } catch (err) {
       if (err instanceof ApiError) {
         setError(err.data?.message || err.message)
@@ -66,17 +87,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         method: 'POST',
         credentials: 'include',
       })
-    } catch (error) {
+    } catch (_logoutError) {
       // Ignore logout errors
     }
 
     // Clear client-side session
     sessionStorage.removeItem('user')
     setUser(null)
+    setToken(null)
   }
 
   return (
-    <AuthContext.Provider value={{ user, isLoading, login, logout, error }}>
+    <AuthContext.Provider value={{ user, token, isLoading, login, logout, error }}>
       {children}
     </AuthContext.Provider>
   )

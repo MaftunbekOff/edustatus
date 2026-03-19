@@ -3,7 +3,7 @@
 import * as React from "react"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
-import { Upload, X, File, FileText, Image, FileSpreadsheet } from "lucide-react"
+import { Upload, X, File, FileText, ImageIcon, FileSpreadsheet } from "lucide-react"
 
 interface FileUploadProps {
   value?: File[]
@@ -98,7 +98,7 @@ export function FileUpload({
 
   const getFileIcon = (file: File) => {
     const type = file.type
-    if (type.startsWith("image/")) return <Image className="h-5 w-5" />
+    if (type.startsWith("image/")) return <ImageIcon className="h-5 w-5" />
     if (type.includes("spreadsheet") || type.includes("excel"))
       return <FileSpreadsheet className="h-5 w-5" />
     if (type.includes("text") || type.includes("document"))

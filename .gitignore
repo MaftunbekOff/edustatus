@@ -13,6 +13,7 @@ frontend/out/
 # Production
 build/
 dist/
+target/
 
 # Misc
 .DS_Store
