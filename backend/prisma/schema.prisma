@@ -1,0 +1,495 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==================== SUPER ADMIN ====================
+
+model SuperAdmin {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  password  String
+  fullName  String
+  role      String   @default("creator")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ==================== ORGANIZATION (TASHKILOT) ====================
+
+model Organization {
+  id            String   @id @default(cuid())
+  name          String
+  inn           String   @unique // Soliq to'lovchi identifikatsiya raqami (9 raqam)
+  
+  // Tashkilot ma'lumotlari
+  type          String   @default("other") // Tashkilot turi (education, medical, service, retail, manufacturing, other)
+  industry      String   @default("other") // Soha (education, healthcare, finance, retail, manufacturing, it, other)
+  isGovernment  Boolean  @default(true) // Davlat tashkiloti yoki Xususiy
+  region        String   // Viloyat (majburiy)
+  district      String   // Tuman/Shahar (majburiy)
+  
+  // Hierarchical structure (Quyi tashkilotlar)
+  parentId      String?  // Ota tashkilot ID si
+  parent        Organization? @relation("SubOrganizations", fields: [parentId], references: [id], onDelete: Cascade)
+  children      Organization[] @relation("SubOrganizations")
+  
+  subdomain     String?  @unique // Keyinroq sozlanadi
+  customDomain  String?  @unique
+  plan          String   @default("basic") // basic, pro, enterprise
+  status        String   @default("trial") // trial, active, suspended
+  email         String?  // Email manzil
+  phone         String   // Telefon raqam (majburiy)
+  address       String   // Manzil (majburiy)
+  logo          String?
+  
+  // Features
+  hasClients        Boolean @default(true)
+  hasPayments       Boolean @default(true)
+  hasReports        Boolean @default(true)
+  hasBankIntegration Boolean @default(false)
+  hasTelegramBot    Boolean @default(false)
+  hasSmsNotifications Boolean @default(false)
+  hasExcelImport    Boolean @default(false)
+  hasPdfReports     Boolean @default(false)
+  allowSubOrganizations Boolean @default(false) // Quyi tashkilotlarni aktivlashtirish
+  
+  // Subscription
+  subscriptionEndsAt DateTime?
+  trialEndsAt       DateTime?
+  
+  // Stats
+  clientLimit   Int      @default(100)
+  departmentLimit Int    @default(5)
+  
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  
+  // Relations
+  admins         OrganizationAdmin[]
+  departments    Department[]
+  clients        Client[]
+  payments       Payment[]
+  bankRecords    BankRecord[]
+  contracts      Contract[]
+  reminders      Reminder[]
+  attendance     Attendance[]
+  customDomains  CustomDomain[]
+}
+
+model OrganizationAdmin {
+  id        String   @id @default(cuid())
+  organizationId String
+  email     String   @unique
+  password  String
+  fullName  String
+  phone     String?  // Telefon raqam
+  role      String   @default("admin") // admin, accountant, manager, operator
+  status    String   @default("active") // active, blocked
+  lastLogin DateTime?
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  
+  @@index([organizationId])
+}
+
+// ==================== CLIENTS (MIJOZLAR) ====================
+
+model Client {
+  id             String   @id @default(cuid())
+  organizationId String
+  pinfl          String?  // PINFL (14 raqam) - ixtiyoriy
+  contractNumber String?  @unique
+  fullName       String
+  phone         String?
+  email         String?
+  address       String?
+  birthDate     DateTime?
+  departmentId  String?
+  
+  // Financial
+  totalAmount   Float    @default(0) // Shartnoma summasi
+  paidAmount    Float    @default(0) // To'langan summa
+  debtAmount    Float    @default(0) // Qarz
+  
+  // Status
+  status        String   @default("active") // active, inactive, archived
+  
+  // Additional info (JSON for flexibility)
+  additionalInfo String? // JSON formatida qo'shimcha ma'lumotlar
+  
+  // Contact person (for B2B)
+  contactPhone   String?
+  contactName    String?
+  
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  organization  Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  department    Department?  @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  payments      Payment[]
+  contracts     Contract[]
+  attendance    Attendance[]
+  
+  @@unique([organizationId, pinfl])
+  @@index([organizationId])
+  @@index([pinfl])
+  @@index([departmentId])
+  @@index([organizationId, status])  // Critical for active clients queries
+  @@index([organizationId, createdAt])  // For recent clients
+  @@index([organizationId, totalAmount])  // For high-value clients
+}
+
+// ==================== DEPARTMENTS (BO'LIMLAR) ====================
+
+model Department {
+  id          String   @id @default(cuid())
+  organizationId String
+  name        String
+  code        String?  // Bo'lim kodi
+  description String?  // Tavsif
+  managerName String?  // Bo'lim boshlig'i
+  
+  // For educational institutions
+  specialty   String?
+  course      Int?
+  year        Int?
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  clients      Client[]
+  
+  @@unique([organizationId, name])
+  @@index([organizationId])
+}
+
+// ==================== PAYMENTS ====================
+
+model Payment {
+  id             String   @id @default(cuid())
+  organizationId String
+  clientId      String
+  
+  amount         Float
+  currency       String   @default("UZS")
+  paymentMethod  String   // bank, cash, click, payme, card, transfer, other
+  status         String   @default("pending") // pending, confirmed, rejected, cancelled
+  
+  // Bank details
+  transactionId     String?
+  referenceNumber   String?
+  bankAccount       String?
+  bankMfo           String?
+  bankName          String?
+  
+  // Dates
+  paymentDate       DateTime
+  confirmedAt       DateTime?
+  confirmedBy       String?
+  
+  description       String?
+  
+  // Reconciliation
+  reconciled        Boolean  @default(false)
+  reconciledAt      DateTime?
+  reconciledWith    String? // Bank record ID
+  
+  // Payment category
+  category          String? // tuition, service, product, subscription, other
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client            Client  @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  
+  @@index([organizationId])
+  @@index([clientId])
+  @@index([status])
+  @@index([paymentDate])
+  @@index([organizationId, status, paymentDate])  // Critical for payment dashboards
+  @@index([organizationId, clientId, paymentDate])  // For client payment history
+  @@index([organizationId, amount])  // For high-value payments
+}
+
+// ==================== BANK RECORDS ====================
+
+model BankRecord {
+  id              String   @id @default(cuid())
+  organizationId String
+  
+  // Bank data
+  transactionId   String   @unique
+  amount          Float
+  currency        String   @default("UZS")
+  senderAccount   String?
+  senderName      String?
+  senderMfo       String?
+  receiverAccount String?
+  receiverMfo     String?
+  purpose         String?  // To'lov maqsadi
+  transactionDate DateTime
+  
+  // Reconciliation
+  status          String   @default("new") // new, matched, unmatched, ignored
+  matchedWith     String?  // Payment ID
+  matchedAt       DateTime?
+  
+  // Import info
+  importedFrom    String?  // File name or source
+  importedAt      DateTime @default(now())
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  
+  @@index([organizationId])
+  @@index([status])
+  @@index([transactionDate])
+}
+
+// ==================== CONTRACTS ====================
+
+model Contract {
+  id              String   @id @default(cuid())
+  organizationId String
+  clientId       String
+  
+  contractNumber  String   @unique
+  contractDate    DateTime
+  startDate       DateTime
+  endDate         DateTime?
+  
+  amount          Float    // Shartnoma summasi
+  paymentSchedule String?  // JSON: to'lov jadvali
+  
+  // Generated document
+  documentUrl     String?
+  
+  status          String   @default("active") // active, completed, cancelled
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client          Client  @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  
+  @@index([organizationId])
+  @@index([clientId])
+}
+
+// ==================== REMINDERS ====================
+
+model Reminder {
+  id          String   @id @default(cuid())
+  organizationId String
+  
+  type        String   // payment, debt, deadline, custom
+  title       String
+  message     String
+  
+  // Target
+  targetType  String   // all, department, client
+  targetId    String?  // Department ID or Client ID
+  
+  // Schedule
+  scheduledAt DateTime
+  sentAt      DateTime?
+  status      String   @default("pending") // pending, sent, failed
+  
+  // Channels
+  sendSms     Boolean  @default(false)
+  sendEmail   Boolean  @default(false)
+  sendTelegram Boolean @default(false)
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  
+  @@index([organizationId])
+  @@index([status])
+  @@index([scheduledAt])
+}
+
+// ==================== ATTENDANCE ====================
+
+model Attendance {
+  id          String   @id @default(cuid())
+  organizationId String
+  clientId    String
+  
+  date        DateTime
+  status      String   // present, absent, late, excused
+  note        String?
+  
+  // QR Code scan info
+  scannedAt   DateTime?
+  scannedBy   String?
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  client      Client  @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  
+  @@unique([clientId, date])
+  @@index([organizationId])
+  @@index([clientId])
+  @@index([date])
+}
+
+// ==================== CLIENT USER (MIJOZ FOYDALANUVCHISI) ====================
+
+model ClientUser {
+  id          String   @id @default(cuid())
+  phone       String   @unique
+  password    String
+  fullName    String?
+  
+  // Linked clients (by PINFL or phone)
+  linkedClients String[] // Client ID lar ro'yxati
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// ==================== CUSTOM DOMAINS ====================
+
+model CustomDomain {
+  id                String   @id @default(cuid())
+  organizationId String
+  
+  // Domain info
+  domain            String   @unique // client.example.uz
+  isPrimary         Boolean  @default(false)
+  
+  // Verification
+  status            String   @default("pending") // pending, verifying, active, failed
+  verificationToken String?  // DNS TXT record uchun token
+  verifiedAt        DateTime?
+  
+  // SSL
+  sslStatus         String   @default("pending") // pending, provisioning, active, failed
+  sslProvisionedAt  DateTime?
+  
+  // Error tracking
+  lastError         String?
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  
+  @@index([organizationId])
+  @@index([status])
+}
+
+// ==================== AUDIT LOG ====================
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  organizationId String?
+  userId      String?
+  action      String   // create, update, delete, login, etc.
+  entity      String   // Client, Payment, etc.
+  entityId    String?
+  oldValue    String?  // JSON
+  newValue    String?  // JSON
+  ipAddress   String?
+  userAgent   String?
+  
+  createdAt   DateTime @default(now())
+  
+  @@index([organizationId])
+  @@index([userId])
+  @@index([createdAt])
+}
+
+// ==================== REFRESH TOKEN ====================
+
+model RefreshToken {
+  id           String   @id @default(cuid())
+  token        String   @unique
+  userId       String
+  userType     String   // "creator" or "organization_admin"
+  expiresAt    DateTime
+  revoked      Boolean  @default(false)
+  revokedAt    DateTime?
+  replacedBy   String?  // New token ID when refreshed
+  
+  // Device info
+  deviceInfo   String?  // User agent
+  ipAddress    String?
+  
+  createdAt    DateTime @default(now())
+  
+  @@index([userId])
+  @@index([token])
+  @@index([expiresAt])
+}
+
+// ==================== LOGIN HISTORY ====================
+
+model LoginHistory {
+  id           String   @id @default(cuid())
+  userId       String
+  userType     String   // "creator" or "organization_admin"
+  email        String
+  
+  // Login details
+  success      Boolean
+  failureReason String? // "invalid_password", "user_not_found", "account_locked"
+  
+  // Device & Location
+  ipAddress    String?
+  userAgent    String?
+  deviceType   String?  // "desktop", "mobile", "tablet"
+  browser      String?
+  os           String?
+  country      String?
+  city         String?
+  
+  createdAt    DateTime @default(now())
+  
+  @@index([userId])
+  @@index([email])
+  @@index([createdAt])
+}
+
+// ==================== USER SESSION ====================
+
+model UserSession {
+  id           String   @id @default(cuid())
+  userId       String
+  userType     String   // "creator" or "organization_admin"
+  sessionToken String   @unique
+  
+  // Device info
+  deviceInfo   String?
+  ipAddress    String?
+  userAgent    String?
+  
+  // Activity
+  lastActivity DateTime @default(now())
+  expiresAt    DateTime
+  
+  createdAt    DateTime @default(now())
+  
+  @@index([userId])
+  @@index([sessionToken])
+  @@index([expiresAt])
+}
