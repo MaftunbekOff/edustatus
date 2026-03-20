@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
+import { PrismaModule } from './prisma/prisma.module';
 import { DatabaseModule } from './database/database.module';
 import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
@@ -21,6 +22,7 @@ import { PerformanceInterceptor } from './common/performance.interceptor';
       isGlobal: true,
       envFilePath: '.env',
     }),
+    PrismaModule,
     // Global rate limiting: 60 requests per minute by default
     ThrottlerModule.forRoot([
       {
