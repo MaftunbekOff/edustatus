@@ -10,6 +10,10 @@ coverage/
 frontend/.next/
 frontend/out/
 
+# SvelteKit
+web/.svelte-kit/
+web/node_modules/
+
 # Production
 build/
 dist/

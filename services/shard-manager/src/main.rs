@@ -81,10 +81,17 @@ impl ShardManager {
                     db_user, db_password, db_host, db_port, db_name
                 );
 
-                let pool = PgPoolOptions::new()
+                let pool = match PgPoolOptions::new()
                     .max_connections(50)
                     .connect(&database_url)
-                    .await?;
+                    .await
+                {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!("Shard {} connection failed ({}): {}", shard_id, database_url, e);
+                        continue;
+                    }
+                };
 
                 shards.insert(shard_id.clone(), ShardConnection {
                     pool,

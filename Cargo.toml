@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "services/rust-core",
+    "services/rust-health",
+    "services/shard-manager",
+]
+resolver = "2"

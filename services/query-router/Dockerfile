@@ -1,29 +1,25 @@
-# Build stage
 FROM golang:1.26.1-alpine AS builder
 
 WORKDIR /app
 
-# Copy go mod
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy source
 COPY . .
 
-# Build
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o query-router .
 
-# Final stage
-FROM alpine:latest
+FROM alpine:3.21
 
-RUN apk --no-cache add ca-certificates
-WORKDIR /root/
+RUN apk --no-cache add ca-certificates wget
 
-# Copy the binary
+WORKDIR /app
+
 COPY --from=builder /app/query-router .
 
-# Expose port
-EXPOSE 8080
+EXPOSE 8082
 
-# Run
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD wget -qO- http://127.0.0.1:8082/health || exit 1
+
 CMD ["./query-router"]

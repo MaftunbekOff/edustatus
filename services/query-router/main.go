@@ -1,12 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"io"
 	"net/http"
 	"os"
 	"regexp"
@@ -16,7 +16,6 @@ import (
 
 	redis "github.com/redis/go-redis/v9"
 	"github.com/gorilla/mux"
-	_ "github.com/lib/pq"
 	"github.com/rs/zerolog"
 )
 
@@ -43,38 +42,71 @@ type QueryResult struct {
 	ExecutionTime int64                    `json:"executionTime"`
 }
 
-type ShardConnection struct {
-	ShardID string
-	Pool    *sql.DB
+// ShardManagerLocation mirrors shard-manager's OrganizationLocation response.
+type ShardManagerLocation struct {
+	Region string `json:"region"`
+	Shard  string `json:"shard"`
+	Schema string `json:"schema"`
 }
 
-type OrganizationLocation struct {
-	Schema string
-}
-
-type QueryRouter struct {
-	logger zerolog.Logger
-	redis  *redis.Client
+// ShardManagerExecuteRequest mirrors shard-manager's QueryRequest.
+type ShardManagerExecuteRequest struct {
+	OrgID  string               `json:"org_id"`
+	Query  string               `json:"query"`
+	Params []interface{}        `json:"params"`
 }
 
 var safeIdentifierRegex = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 var allowedTables = map[string]struct{}{
-	"organizations":      {},
-	"organization_admins": {},
-	"clients":            {},
-	"payments":           {},
-	"departments":        {},
-	"audit_logs":         {},
+	"organizations": {},
+	"org_admins":    {},
+	"clients":       {},
+	"payments":      {},
+	"departments":   {},
+	"audit_logs":    {},
 }
 
+// Column names match rust-core Postgres schema (org_id, dept_id, logo_url, …).
 var allowedColumnsByTable = map[string]map[string]struct{}{
-	"organizations": {"id": {}, "name": {}, "inn": {}, "type": {}, "industry": {}, "is_government": {}, "region": {}, "district": {}, "subdomain": {}, "custom_domain": {}, "plan": {}, "status": {}, "email": {}, "phone": {}, "address": {}, "logo": {}, "created_at": {}, "updated_at": {}},
-	"organization_admins": {"id": {}, "organization_id": {}, "email": {}, "full_name": {}, "phone": {}, "role": {}, "status": {}, "last_login": {}, "created_at": {}, "updated_at": {}},
-	"clients": {"id": {}, "organization_id": {}, "pinfl": {}, "contract_number": {}, "full_name": {}, "phone": {}, "email": {}, "address": {}, "birth_date": {}, "department_id": {}, "total_amount": {}, "paid_amount": {}, "debt_amount": {}, "status": {}, "additional_info": {}, "contact_phone": {}, "contact_name": {}, "created_at": {}, "updated_at": {}},
-	"payments": {"id": {}, "organization_id": {}, "client_id": {}, "amount": {}, "currency": {}, "payment_method": {}, "status": {}, "transaction_id": {}, "reference_number": {}, "bank_account": {}, "bank_mfo": {}, "bank_name": {}, "payment_date": {}, "confirmed_at": {}, "confirmed_by": {}, "description": {}, "reconciled": {}, "reconciled_at": {}, "reconciled_with": {}, "category": {}, "created_at": {}, "updated_at": {}},
-	"departments": {"id": {}, "organization_id": {}, "name": {}, "code": {}, "description": {}, "manager_name": {}, "specialty": {}, "course": {}, "year": {}, "created_at": {}, "updated_at": {}},
-	"audit_logs": {"id": {}, "organization_id": {}, "user_id": {}, "action": {}, "entity": {}, "entity_id": {}, "old_value": {}, "new_value": {}, "ip_address": {}, "user_agent": {}, "created_at": {}},
+	"organizations": {
+		"id": {}, "name": {}, "inn": {}, "type": {}, "industry": {}, "is_government": {}, "region": {}, "district": {},
+		"parent_id": {}, "subdomain": {}, "custom_domain": {}, "plan": {}, "status": {}, "email": {}, "phone": {}, "address": {}, "logo_url": {},
+		"has_clients": {}, "has_payments": {}, "has_reports": {}, "has_bank_integration": {}, "has_telegram_bot": {},
+		"has_sms_notifications": {}, "has_excel_import": {}, "has_pdf_reports": {}, "allow_sub_orgs": {},
+		"client_limit": {}, "department_limit": {}, "subscription_ends_at": {}, "trial_ends_at": {},
+		"shard_region": {}, "shard_instance": {}, "created_at": {}, "updated_at": {},
+	},
+	"org_admins": {
+		"id": {}, "org_id": {}, "email": {}, "password_hash": {}, "full_name": {}, "phone": {}, "role": {}, "status": {},
+		"last_login": {}, "created_at": {}, "updated_at": {},
+	},
+	"clients": {
+		"id": {}, "org_id": {}, "pinfl": {}, "contract_number": {}, "full_name": {}, "phone": {}, "email": {}, "address": {},
+		"birth_date": {}, "dept_id": {}, "total_amount": {}, "paid_amount": {}, "debt_amount": {}, "status": {},
+		"additional_info": {}, "contact_phone": {}, "contact_name": {}, "created_at": {}, "updated_at": {},
+	},
+	"payments": {
+		"id": {}, "org_id": {}, "client_id": {}, "amount": {}, "currency": {}, "payment_method": {}, "status": {},
+		"transaction_id": {}, "reference_number": {}, "bank_account": {}, "bank_mfo": {}, "bank_name": {},
+		"payment_date": {}, "confirmed_at": {}, "confirmed_by": {}, "description": {}, "reconciled": {},
+		"reconciled_at": {}, "reconciled_with": {}, "category": {}, "created_at": {}, "updated_at": {},
+	},
+	"departments": {
+		"id": {}, "org_id": {}, "name": {}, "code": {}, "description": {}, "manager_name": {}, "specialty": {},
+		"course": {}, "year": {}, "created_at": {}, "updated_at": {},
+	},
+	"audit_logs": {
+		"id": {}, "org_id": {}, "user_id": {}, "action": {}, "entity": {}, "entity_id": {}, "old_value": {}, "new_value": {},
+		"ip_address": {}, "user_agent": {}, "created_at": {},
+	},
+}
+
+type QueryRouter struct {
+	logger          zerolog.Logger
+	redis           *redis.Client
+	shardManagerURL string
+	httpClient      *http.Client
 }
 
 func NewQueryRouter() *QueryRouter {
@@ -86,10 +118,24 @@ func NewQueryRouter() *QueryRouter {
 		DB:       0,
 	})
 
+	shardManagerURL := strings.TrimRight(
+		getEnv("SHARD_MANAGER_URL", "http://shard-manager:8081"),
+		"/",
+	)
+
+	httpClient := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConns:    20,
+			IdleConnTimeout: 90 * time.Second,
+		},
+	}
+
 	return &QueryRouter{
-		logger: logger,
-		redis:  rdb,
-		// shardManager will be set later
+		logger:          logger,
+		redis:           rdb,
+		shardManagerURL: shardManagerURL,
+		httpClient:      httpClient,
 	}
 }
 
@@ -112,7 +158,7 @@ func (qr *QueryRouter) RouteQuery(w http.ResponseWriter, r *http.Request) {
 
 	cacheKey := qr.buildCacheKey(query)
 
-	// Check cache for read operations
+	// Return cached result for SELECT operations
 	if query.Operation == "SELECT" {
 		if cached := qr.getFromCache(cacheKey); cached != nil {
 			cached.ExecutionTime = time.Since(startTime).Milliseconds()
@@ -121,7 +167,7 @@ func (qr *QueryRouter) RouteQuery(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Execute on shard
+	// Execute on shard via shard-manager
 	result, err := qr.executeOnShard(query)
 	if err != nil {
 		qr.logger.Error().Err(err).Str("orgId", query.OrgID).Msg("Query execution failed")
@@ -129,7 +175,7 @@ func (qr *QueryRouter) RouteQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Cache read results
+	// Cache SELECT results
 	if query.Operation == "SELECT" {
 		qr.setCache(cacheKey, result, qr.getCacheTTL(query.Table))
 	}
@@ -138,56 +184,78 @@ func (qr *QueryRouter) RouteQuery(w http.ResponseWriter, r *http.Request) {
 	qr.respondJSON(w, result)
 }
 
-func (qr *QueryRouter) executeOnShard(query ParsedQuery) (*QueryResult, error) {
-	// Placeholder: get shard connection
-	// In real implementation, integrate with ShardManager
-	conn := qr.getShardConnection(query.OrgID)
-	if conn == nil {
-		return nil, errors.New("database connection is not available")
-	}
-	location := qr.getOrganizationLocation(query.OrgID)
+// getOrganizationSchema calls shard-manager to resolve the DB schema for an org.
+func (qr *QueryRouter) getOrganizationSchema(orgID string) (string, error) {
+	url := fmt.Sprintf("%s/location/%s", qr.shardManagerURL, orgID)
 
-	sql := qr.buildSQLQuery(query, location.Schema)
+	resp, err := qr.httpClient.Get(url)
+	if err != nil {
+		return "", fmt.Errorf("shard-manager unreachable: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return "", fmt.Errorf("organization %s not found in any shard", orgID)
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("shard-manager returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var loc ShardManagerLocation
+	if err := json.NewDecoder(resp.Body).Decode(&loc); err != nil {
+		return "", fmt.Errorf("invalid location response: %w", err)
+	}
+
+	if loc.Schema == "" {
+		return "public", nil
+	}
+	return loc.Schema, nil
+}
+
+// executeOnShard builds the SQL query, then delegates execution to shard-manager.
+func (qr *QueryRouter) executeOnShard(query ParsedQuery) (*QueryResult, error) {
+	schema, err := qr.getOrganizationSchema(query.OrgID)
+	if err != nil {
+		return nil, err
+	}
+
+	rawSQL := qr.buildSQLQuery(query, schema)
 	params := qr.extractParams(query)
 
-	qr.logger.Debug().Str("sql", sql).Interface("params", params).Msg("Executing query")
+	reqBody := ShardManagerExecuteRequest{
+		OrgID:  query.OrgID,
+		Query:  rawSQL,
+		Params: params,
+	}
 
-	rows, err := conn.Query(sql, params...)
+	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("marshal execute request: %w", err)
 	}
-	defer rows.Close()
 
-	var result QueryResult
-	cols, err := rows.Columns()
+	url := fmt.Sprintf("%s/execute", qr.shardManagerURL)
+	resp, err := qr.httpClient.Post(url, "application/json", bytes.NewReader(bodyBytes))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("shard-manager execute failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("shard-manager execute returned %d: %s", resp.StatusCode, string(body))
 	}
 
-	for rows.Next() {
-		values := make([]interface{}, len(cols))
-		valuePtrs := make([]interface{}, len(cols))
-		for i := range values {
-			valuePtrs[i] = &values[i]
-		}
-
-		if err := rows.Scan(valuePtrs...); err != nil {
-			return nil, err
-		}
-
-		row := make(map[string]interface{})
-		for i, col := range cols {
-			val := values[i]
-			if b, ok := val.([]byte); ok {
-				val = string(b)
-			}
-			row[col] = val
-		}
-		result.Rows = append(result.Rows, row)
+	// shard-manager returns []serde_json::Value (array of row objects)
+	var rows []map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
+		return nil, fmt.Errorf("decode execute response: %w", err)
 	}
 
-	result.Count = len(result.Rows)
-	return &result, nil
+	return &QueryResult{
+		Rows:  rows,
+		Count: len(rows),
+	}, nil
 }
 
 func (qr *QueryRouter) buildSQLQuery(query ParsedQuery, schema string) string {
@@ -299,8 +367,7 @@ func (qr *QueryRouter) extractParams(query ParsedQuery) []interface{} {
 
 	if query.Data != nil {
 		for _, k := range sortedKeys(query.Data) {
-			v := query.Data[k]
-			params = append(params, v)
+			params = append(params, query.Data[k])
 		}
 	}
 
@@ -351,7 +418,6 @@ func (qr *QueryRouter) setCache(key string, data *QueryResult, ttl time.Duration
 		qr.logger.Warn().Err(err).Msg("Failed to marshal data for cache")
 		return
 	}
-
 	qr.redis.Set(context.Background(), key, jsonData, ttl)
 }
 
@@ -369,32 +435,15 @@ func (qr *QueryRouter) getCacheTTL(table string) time.Duration {
 	return 30 * time.Minute
 }
 
-// Placeholder methods - need to integrate with actual ShardManager
-func (qr *QueryRouter) getShardConnection(orgID string) *sql.DB {
-	// Placeholder implementation
-	// In real implementation, call Shard Manager service
-	// For now, return a mock DB connection
-	db, err := sql.Open("postgres", os.Getenv("DATABASE_URL"))
-	if err != nil {
-		log.Printf("Failed to connect to DB: %v", err)
-		return nil
-	}
-	return db
-}
-
-func (qr *QueryRouter) getOrganizationLocation(orgID string) OrganizationLocation {
-	// Placeholder - in real implementation, call Shard Manager service
-	// For now, parse orgID to get schema
-	parts := strings.Split(orgID, "-")
-	if len(parts) != 3 {
-		return OrganizationLocation{Schema: "public"}
-	}
-	return OrganizationLocation{Schema: "org_" + strings.ReplaceAll(orgID, "-", "")}
-}
-
 func (qr *QueryRouter) respondJSON(w http.ResponseWriter, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(data)
+}
+
+func healthHandler(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"ok","service":"query-router"}`))
 }
 
 func getEnv(key, defaultVal string) string {
@@ -498,13 +547,43 @@ func mustValidateJoinCondition(baseTable string, joinTable string, clause string
 	return fmt.Sprintf("%s.%s = %s.%s", leftTable, leftColumn, rightTable, rightColumn)
 }
 
+// validateShardManagerConnection checks that shard-manager is reachable at startup.
+func (qr *QueryRouter) validateShardManagerConnection() error {
+	url := fmt.Sprintf("%s/health", qr.shardManagerURL)
+	resp, err := qr.httpClient.Get(url)
+	if err != nil {
+		return fmt.Errorf("cannot reach shard-manager at %s: %w", qr.shardManagerURL, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return errors.New("shard-manager health check failed")
+	}
+	return nil
+}
+
 func main() {
 	qr := NewQueryRouter()
 
+	if err := qr.validateShardManagerConnection(); err != nil {
+		qr.logger.Fatal().Err(err).Msg("shard-manager not available")
+	}
+
 	r := mux.NewRouter()
 	r.HandleFunc("/query", qr.RouteQuery).Methods("POST")
+	r.HandleFunc("/health", healthHandler).Methods("GET")
 
-	port := getEnv("PORT", "8080")
-	qr.logger.Info().Str("port", port).Msg("Starting Query Router service")
-	log.Fatal(http.ListenAndServe(":"+port, r))
+	port := getEnv("PORT", "8082")
+	qr.logger.Info().Str("port", port).Str("shardManager", qr.shardManagerURL).Msg("Starting Query Router")
+
+	srv := &http.Server{
+		Addr:         ":" + port,
+		Handler:      r,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		qr.logger.Fatal().Err(err).Msg("server error")
+	}
 }

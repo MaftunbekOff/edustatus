@@ -1,11 +1,24 @@
 # ===========================================
-# EduStatus Docker Compose Configuration
+# EduStatus — Full Backend: Rust Core + Go Connectors
+# NestJS / Node.js / Prisma completely removed
 # ===========================================
-# IMPORTANT: Create .env file from .env.example
-# Run: docker-compose --env-file .env up -d
+# Run: docker compose --env-file .env up -d --build
+#
+# Default: mahalliy (FRONTEND_URL=http://127.0.0.1:3000). Production: https://edustatus.uz va .env da mos parollar.
+#
+# Serverda yangilash (DB saqlansin):
+#   - Hech qachon: docker compose down -v  → postgres_data / redis_data o‘chadi (yangi “bo‘sh” DB).
+#   - Yaxshi: git pull && docker compose --env-file .env up -d --build
+#   - Bir xil katalogda, bir xil COMPOSE_PROJECT_NAME (default: papka nomi) — volume nomlari shunga bog‘liq.
+#   - .env da POSTGRES_PASSWORD / POSTGRES_DB o‘zgartirilsa, mavjud volume’dagi cluster bilan nom mos kelmasligi muammo beradi.
+#
+# Qisqa to‘xtash: bitta hostda konteynerlar qayta yaratiladi; nginx/traefik orqali ikki instans — uzilishsizroq.
 # ===========================================
 
 services:
+
+  # ─── Infrastructure ──────────────────────────────────────────────────────────
+
   postgres:
     image: postgres:18-alpine
     container_name: edustatus-db
@@ -14,13 +27,10 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: ${POSTGRES_DB:-edustatus}
-      # Use scram-sha-256 for secure authentication
       POSTGRES_HOST_AUTH_METHOD: scram-sha-256
       POSTGRES_INITDB_ARGS: "--auth=scram-sha-256"
-    # Only expose to localhost, not to external network
-    # Comment out for production - only use for development
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -29,96 +39,205 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
-    command:
-      - postgres
-      - -c
-      - log_statement=all
-      - -c
-      - log_connections=on
-      - -c
-      - log_disconnections=on
     networks:
       - backend-network
     deploy:
       resources:
         limits:
-          cpus: '1'
-          memory: 1G
+          cpus: '2'
+          memory: 2G
         reservations:
-          cpus: '0.25'
-          memory: 256M
+          cpus: '0.5'
+          memory: 512M
     security_opt:
       - no-new-privileges:true
-    # PostgreSQL needs write access, so read_only is false
     read_only: false
     tmpfs:
       - /var/run/postgresql
       - /tmp
 
-  backend:
+  redis:
+    image: redis:7-alpine
+    container_name: edustatus-redis
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    command: >
+      redis-server
+        --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+        --appendonly yes
+        --maxmemory 256mb
+        --maxmemory-policy volatile-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend-network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+    security_opt:
+      - no-new-privileges:true
+
+  # ─── Rust Core (70%) ─────────────────────────────────────────────────────────
+  # Auth/JWT · Users · Organizations · Clients · Departments
+  # Billing · Contracts · Bank Records · Reminders · Attendance
+  # Real-time WebSocket · Anomaly Detection · Security · Audit Log
+
+  rust-core:
     build:
-      context: ./backend
+      context: ./services/rust-core
       dockerfile: Dockerfile
-    container_name: edustatus-backend
+    container_name: edustatus-rust-core
     restart: unless-stopped
     ports:
-      - "127.0.0.1:3001:3001"
+      - "127.0.0.1:8082:8080"
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-edustatus}?schema=public
+      - PORT=8080
+      # Migrations as superuser; app pool as edustatus_app so PostgreSQL RLS policies apply (not bypassed).
+      - MIGRATE_DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-edustatus}
+      - DATABASE_URL=postgresql://edustatus_app:${EDUSTATUS_APP_PASSWORD}@postgres:5432/${POSTGRES_DB:-edustatus}
+      - EDUSTATUS_APP_PASSWORD=${EDUSTATUS_APP_PASSWORD:?EDUSTATUS_APP_PASSWORD is required (strong secret; synced to role edustatus_app on startup)}
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required}
-      - JWT_EXPIRES_IN=${JWT_EXPIRES_IN:-7d}
-      - PORT=3001
-      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3000}
+      - JWT_ACCESS_TTL_SECS=${JWT_ACCESS_TTL_SECS:-900}
+      - JWT_REFRESH_TTL_SECS=${JWT_REFRESH_TTL_SECS:-604800}
+      - FRONTEND_URL=${FRONTEND_URL:-http://127.0.0.1:3000}
+      - GO_CONNECTORS_URL=http://go-connectors:8090
+      - QUERY_ROUTER_URL=http://query-router:8082
+      # direct = single Postgres (default). distributed = health also checks query-router + shard-manager.
+      - DATA_PLANE=${DATA_PLANE:-direct}
+      - SHARD_MANAGER_URL=http://shard-manager:8081
+      # Used when DATA_PLANE=distributed to set organizations.shard_region / shard_instance on create
+      - SHARD_REGIONS=${SHARD_REGIONS:-uz-tashkent}
+      - DEFAULT_SHARD_INSTANCE=${DEFAULT_SHARD_INSTANCE:-00-0000}
+      - INTERNAL_SECRET=${INTERNAL_SECRET:?INTERNAL_SECRET is required}
+      - NODE_ENV=${NODE_ENV:-production}
+      - MAX_SESSIONS_PER_USER=${MAX_SESSIONS_PER_USER:-5}
+      - RUST_LOG=rust_core=info,tower_http=warn,sqlx=warn
       - SUPER_ADMIN_EMAIL=${SUPER_ADMIN_EMAIL:?SUPER_ADMIN_EMAIL is required}
       - SUPER_ADMIN_PASSWORD=${SUPER_ADMIN_PASSWORD:?SUPER_ADMIN_PASSWORD is required}
-      - NODE_ENV=production
-      - QUERY_ROUTER_URL=http://query-router:8080
-      - SHARD_MANAGER_URL=http://shard-manager:8081
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/api/health"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/api/v1/health/live"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 30s
     networks:
       - frontend-network
       - backend-network
     deploy:
       resources:
         limits:
-          cpus: '1'
+          cpus: '2'
           memory: 1G
         reservations:
           cpus: '0.5'
-          memory: 512M
+          memory: 256M
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    # Read-only filesystem for security
     read_only: true
     tmpfs:
-    - /tmp
-    - /app/logs
+      - /tmp
 
-  query-router:
+  # ─── Go Connectors (30%) ─────────────────────────────────────────────────────
+  # Stripe · Payme · Bank API · 1C/ERP · Tax/MXIK · E-commerce · Webhooks
+
+  go-connectors:
     build:
-      context: ./services/query-router
+      context: ./services/go-connectors
       dockerfile: Dockerfile
-    container_name: edustatus-query-router
+    container_name: edustatus-go-connectors
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8092:8090"
     environment:
-      - REDIS_ADDR=redis:6379
-      - PORT=8080
+      - PORT=8090
+      - PAYME_LOGIN=${PAYME_LOGIN:-}
+      - PAYME_MERCHANT_KEY=${PAYME_MERCHANT_KEY:-}
+      - PAYME_WEBHOOK_SECRET=${PAYME_WEBHOOK_SECRET:-}
+      - PAYME_TEST_MODE=${PAYME_TEST_MODE:-true}
+      - BANK_API_URL=${BANK_API_URL:-}
+      - BANK_API_TOKEN=${BANK_API_TOKEN:-}
+      - ERP_BASE_URL=${ERP_BASE_URL:-}
+      - ERP_USERNAME=${ERP_USERNAME:-}
+      - ERP_PASSWORD=${ERP_PASSWORD:-}
+      - TAX_API_URL=${TAX_API_URL:-https://api.soliq.uz}
+      - TAX_API_TOKEN=${TAX_API_TOKEN:-}
+      - TAX_NDS=${TAX_NDS:-0.12}
+      - ECOM_BASE_URL=${ECOM_BASE_URL:-}
+      - ECOM_API_KEY=${ECOM_API_KEY:-}
+      - RUST_CORE_URL=http://rust-core:8080
+      - INTERNAL_SECRET=${INTERNAL_SECRET:?INTERNAL_SECRET is required}
+      - HTTP_TIMEOUT_SECS=15
+      - MAX_RETRIES=3
     depends_on:
-      - redis
+      rust-core:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/go-connectors", "-health-check"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     networks:
       - backend-network
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+
+  # ─── Frontend (SvelteKit) ────────────────────────────────────────────────────
+
+  frontend:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      args:
+        # Baked into SSR bundle; must be reachable from the frontend container (not localhost on the host).
+        PUBLIC_API_URL: http://rust-core:8080
+        PUBLIC_WS_URL: ws://rust-core:8080
+    container_name: edustatus-frontend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    # Always use Docker network hostnames here. Host `.env` often sets PUBLIC_API_URL=http://localhost:8082
+    # for `npm run dev`; if passed through, the container would proxy to its own localhost → 502.
+    environment:
+      - PUBLIC_API_URL=http://rust-core:8080
+      - PUBLIC_WS_URL=ws://rust-core:8080
+      - NODE_ENV=production
+      - HOST=0.0.0.0
+      - PORT=3000
+    depends_on:
+      rust-core:
+        condition: service_healthy
+    networks:
+      - frontend-network
     deploy:
       resources:
         limits:
@@ -129,9 +248,46 @@ services:
           memory: 256M
     security_opt:
       - no-new-privileges:true
+    tmpfs:
+      - /tmp
+
+  # ─── Rust Health (auxiliary health aggregator) ──────────────────────────────
+
+  rust-health:
+    build:
+      context: ./services/rust-health
+      dockerfile: Dockerfile
+    container_name: edustatus-rust-health
+    restart: unless-stopped
+    expose:
+      - "8083"
+    environment:
+      - PORT=8083
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8083/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - backend-network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 64M
+        reservations:
+          cpus: '0.05'
+          memory: 16M
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     read_only: true
     tmpfs:
       - /tmp
+
+  # ─── Shard Manager & Query Router ────────────────────────────────────────────
 
   shard-manager:
     build:
@@ -139,37 +295,66 @@ services:
       dockerfile: Dockerfile
     container_name: edustatus-shard-manager
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:8081:8081"
+    expose:
+      - "8081"
     environment:
       - PORT=8081
-      - DB_USER=orgstatus
+      - DB_USER=${POSTGRES_USER:-postgres}
       - DB_PASSWORD=${POSTGRES_PASSWORD}
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-edustatus}
+      - SHARD_REGIONS=${SHARD_REGIONS:-uz-tashkent}
+      - SHARDS_PER_REGION=${SHARDS_PER_REGION:-1}
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8081/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     networks:
       - backend-network
     deploy:
       resources:
         limits:
           cpus: '0.5'
-          memory: 512M
-        reservations:
-          cpus: '0.25'
           memory: 256M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
     security_opt:
       - no-new-privileges:true
     read_only: true
     tmpfs:
       - /tmp
 
-  redis:
-    image: redis:7-alpine
-    container_name: edustatus-redis
+  query-router:
+    build:
+      context: ./services/query-router
+      dockerfile: Dockerfile
+    container_name: edustatus-query-router
     restart: unless-stopped
-    command: redis-server --appendonly yes
-    volumes:
-      - redis_data:/data
+    expose:
+      - "8082"
+    environment:
+      - PORT=8082
+      - REDIS_ADDR=redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - SHARD_MANAGER_URL=http://shard-manager:8081
+    depends_on:
+      redis:
+        condition: service_healthy
+      shard-manager:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8082/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     networks:
       - backend-network
     deploy:
@@ -178,35 +363,8 @@ services:
           cpus: '0.5'
           memory: 256M
         reservations:
-          cpus: '0.25'
-          memory: 128M
-    security_opt:
-      - no-new-privileges:true
-    read_only: false
-
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    container_name: edustatus-frontend
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:3000:3000"
-    environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:3001
-      - NODE_ENV=production
-    depends_on:
-      - backend
-    networks:
-      - frontend-network
-    deploy:
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 512M
-        reservations:
-          cpus: '0.25'
-          memory: 256M
+          cpus: '0.1'
+          memory: 64M
     security_opt:
       - no-new-privileges:true
     read_only: true
@@ -214,11 +372,8 @@ services:
       - /tmp
 
 networks:
-  # Frontend network - accessible from outside
   frontend-network:
     driver: bridge
-  # Backend network - for internal communication
-  # Note: 'internal: true' removed for development to allow port mapping
   backend-network:
     driver: bridge
 
